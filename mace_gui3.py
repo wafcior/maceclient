@@ -2,6 +2,7 @@ import sys
 import time
 import os
 import ctypes
+import json
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -36,7 +37,10 @@ MAKR_JEST_AKTYWNE = False
 IS_INJECTED = False 
 MINECRAFT_HWND = None 
 
-# Słowniki przechowujące konfiguracje dla modułów
+# Słownik do śledzenia aktualnie wciśniętych klawiszy makra (potrzebny do pętli Side Combo)
+PRESSED_KEYS_STATE = {}
+
+# Domyślne wartości konfiguracji
 BINDS = {
     "Elytra Mace": 'R', 
     "Shield Slam": 'F',
@@ -59,7 +63,8 @@ DELAYS_S = {
 
 CONFIG_SLOTS = {
     "Pearl": {"slot": "6", "final_slot": "1"},
-    "Side Combo": {"final_button": "2"}
+    "Side Combo": {"final_button": "2"},
+    "Elytra Mace": {"chestplate_bind": "5", "final_bind": "4"}
 }
 
 MODULE_STATES = {
@@ -69,6 +74,51 @@ MODULE_STATES = {
     "Rebind Features": True,
     "Side Combo": False, 
 }
+
+CONFIG_FILE = "config.json"
+
+def load_config():
+    """Wczytuje konfigurację z pliku JSON, jeśli plik istnieje."""
+    global BINDS, DELAYS_Z, DELAYS_S, CONFIG_SLOTS, MODULE_STATES
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if "BINDS" in data:
+                    BINDS.update(data["BINDS"])
+                if "DELAYS_Z" in data:
+                    DELAYS_Z.update(data["DELAYS_Z"])
+                if "DELAYS_S" in data:
+                    DELAYS_S.update(data["DELAYS_S"])
+                if "CONFIG_SLOTS" in data:
+                    for k, v in data["CONFIG_SLOTS"].items():
+                        if k in CONFIG_SLOTS:
+                            CONFIG_SLOTS[k].update(v)
+                        else:
+                            CONFIG_SLOTS[k] = v
+                if "MODULE_STATES" in data:
+                    MODULE_STATES.update(data["MODULE_STATES"])
+            print("Configuration loaded successfully.")
+        except Exception as e:
+            print(f"Error loading configuration: {e}")
+
+def save_config():
+    """Zapisuje bieżącą konfigurację do pliku JSON."""
+    data = {
+        "BINDS": BINDS,
+        "DELAYS_Z": DELAYS_Z,
+        "DELAYS_S": DELAYS_S,
+        "CONFIG_SLOTS": CONFIG_SLOTS,
+        "MODULE_STATES": MODULE_STATES
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving configuration: {e}")
+
+# Wczytanie konfiguracji przed zainicjalizowaniem okien
+load_config()
 
 
 # --- KONTROLKI UI Z ANIMACJAMI ---
@@ -190,6 +240,7 @@ class MaceModuleTile(QFrame):
     def _on_toggle(self):
         is_enabled = self.toggle.isChecked()
         MODULE_STATES[self.module_name] = is_enabled
+        save_config()  
         state_text = "WŁĄCZONO" if is_enabled else "WYŁĄCZONO"
         self.parent_window.statusBar().showMessage(f"Moduł '{self.module_name}': {state_text}", 2000)
 
@@ -342,7 +393,7 @@ class ModuleConfigWindow(QWidget):
         self.current_capture_btn = None
         
         self.setWindowTitle(f"{self.module_name} - Konfiguracja")
-        self.setGeometry(200, 200, 480, 420)
+        self.setGeometry(200, 200, 480, 520 if self.module_name == "Elytra Mace" else 420)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False) 
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -431,7 +482,7 @@ class ModuleConfigWindow(QWidget):
         
         config_content = QWidget()
         container_layout = QVBoxLayout(config_content)
-        container_layout.setSpacing(20)
+        container_layout.setSpacing(15)
         container_layout.setContentsMargins(25, 20, 25, 25)
 
         bind_layout = QHBoxLayout()
@@ -451,7 +502,45 @@ class ModuleConfigWindow(QWidget):
         separator.setStyleSheet("background-color: #333333;")
         container_layout.addWidget(separator)
         
-        if self.module_name in ["Elytra Mace", "Shield Slam", "Rebind Features"]:
+        if self.module_name == "Elytra Mace":
+            # Dodatkowe bindy dla Elytra Mace: Klata i Bind Końcowy
+            chestplate_layout = QHBoxLayout()
+            chestplate_layout.addWidget(QLabel("Klawisz Klaty (Chestplate):"))
+            current_chest = CONFIG_SLOTS["Elytra Mace"].get("chestplate_bind", "5")
+            self.chest_btn = QPushButton(current_chest.upper(), objectName="BindButton_Chest")
+            self.chest_btn.setFixedSize(QSize(120, 35))
+            self.chest_btn.clicked.connect(lambda: self._start_capture("mace_chest", self.chest_btn))
+            chestplate_layout.addWidget(self.chest_btn)
+            container_layout.addLayout(chestplate_layout)
+            
+            final_mace_layout = QHBoxLayout()
+            final_mace_layout.addWidget(QLabel("Klawisz Końcowy:"))
+            current_f_mace = CONFIG_SLOTS["Elytra Mace"].get("final_bind", "4")
+            self.final_mace_btn = QPushButton(current_f_mace.upper(), objectName="BindButton_MaceFinal")
+            self.final_mace_btn.setFixedSize(QSize(120, 35))
+            self.final_mace_btn.clicked.connect(lambda: self._start_capture("mace_final", self.final_mace_btn))
+            final_mace_layout.addWidget(self.final_mace_btn)
+            container_layout.addLayout(final_mace_layout)
+
+            val_z = DELAYS_Z.get(self.module_name, 0.05)
+            self.delay_z_label = QLabel(f"Opóźnienie Zwykłe (ms): {int(val_z * 1000)}ms")
+            container_layout.addWidget(self.delay_z_label)
+            self.delay_z_slider = QSlider(Qt.Orientation.Horizontal)
+            self.delay_z_slider.setRange(10, 500)
+            self.delay_z_slider.setValue(int(val_z * 1000))
+            self.delay_z_slider.valueChanged.connect(self._update_delay_z)
+            container_layout.addWidget(self.delay_z_slider)
+
+            val_s = DELAYS_S.get(self.module_name, 0.01)
+            self.delay_s_label = QLabel(f"Opóźnienie Szybkie (ms): {int(val_s * 1000)}ms")
+            container_layout.addWidget(self.delay_s_label)
+            self.delay_s_slider = QSlider(Qt.Orientation.Horizontal)
+            self.delay_s_slider.setRange(5, 100)
+            self.delay_s_slider.setValue(int(val_s * 1000))
+            self.delay_s_slider.valueChanged.connect(self._update_delay_s)
+            container_layout.addWidget(self.delay_s_slider)
+            
+        elif self.module_name in ["Shield Slam", "Rebind Features"]:
             val_z = DELAYS_Z.get(self.module_name, 0.05)
             self.delay_z_label = QLabel(f"Opóźnienie Zwykłe (ms): {int(val_z * 1000)}ms")
             container_layout.addWidget(self.delay_z_label)
@@ -511,11 +600,13 @@ class ModuleConfigWindow(QWidget):
         val_sec = value / 1000.0
         DELAYS_Z[self.module_name] = val_sec
         self.delay_z_label.setText(f"Opóźnienie Zwykłe (ms): {value}ms")
+        save_config()
 
     def _update_delay_s(self, value):
         val_sec = value / 1000.0
         DELAYS_S[self.module_name] = val_sec
         self.delay_s_label.setText(f"Opóźnienie Szybkie (ms): {value}ms")
+        save_config()
 
     def _start_capture(self, capture_type, button_ref):
         self.current_capture_type = capture_type
@@ -526,7 +617,6 @@ class ModuleConfigWindow(QWidget):
         self.status_label.setText("<font color='#E0E0E0'>Oczekiwanie na klawisz lub przycisk myszy...</font>")
         self.grabKeyboard() 
 
-    # Obsługa klawiatury dla bindowania
     def keyPressEvent(self, event):
         if not self.current_capture_type:
             return
@@ -542,7 +632,6 @@ class ModuleConfigWindow(QWidget):
             
         self._process_new_bind(new_key)
 
-    # Obsługa bocznych przycisków myszy dla bindowania w GUI
     def mousePressEvent(self, event):
         if self.current_capture_type:
             btn = event.button()
@@ -573,7 +662,12 @@ class ModuleConfigWindow(QWidget):
             CONFIG_SLOTS["Pearl"]["final_slot"] = new_key.lower()
         elif self.current_capture_type == "side_final":
             CONFIG_SLOTS["Side Combo"]["final_button"] = new_key.lower()
+        elif self.current_capture_type == "mace_chest":
+            CONFIG_SLOTS["Elytra Mace"]["chestplate_bind"] = new_key.lower()
+        elif self.current_capture_type == "mace_final":
+            CONFIG_SLOTS["Elytra Mace"]["final_bind"] = new_key.lower()
             
+        save_config()  
         self.current_capture_btn.setText(new_key)
         self.current_capture_btn.setEnabled(True)
         self.status_label.setText(f"<font color='#50B737'>Zapisano: '{new_key}'</font>")
@@ -589,6 +683,7 @@ class ModuleConfigWindow(QWidget):
 
 class InputListenerThread(QThread):
     key_pressed = Signal(str)
+    key_released = Signal(str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -613,21 +708,41 @@ class InputListenerThread(QThread):
             try:
                 pressed_key = key_to_str(key)
                 if pressed_key and pressed_key in self.active_binds:
-                    self.key_pressed.emit(self.active_binds[pressed_key])
+                    module = self.active_binds[pressed_key]
+                    # Zabezpieczenie przed powtórzeniami systemowymi systemu operacyjnego (system autofire)
+                    if not PRESSED_KEYS_STATE.get(module, False):
+                        PRESSED_KEYS_STATE[module] = True
+                        self.key_pressed.emit(module)
+            except Exception:
+                pass
+
+        def on_release(key):
+            try:
+                released_key = key_to_str(key)
+                if released_key and released_key in self.active_binds:
+                    module = self.active_binds[released_key]
+                    PRESSED_KEYS_STATE[module] = False
+                    self.key_released.emit(module)
             except Exception:
                 pass
                 
         def on_click(x, y, button, pressed):
-            if pressed:
-                btn_str = None
-                if button == Button.x1: btn_str = "MB4"
-                elif button == Button.x2: btn_str = "MB5"
-                elif button == Button.middle: btn_str = "MB3"
-                
-                if btn_str and btn_str in self.active_binds:
-                    self.key_pressed.emit(self.active_binds[btn_str])
+            btn_str = None
+            if button == Button.x1: btn_str = "MB4"
+            elif button == Button.x2: btn_str = "MB5"
+            elif button == Button.middle: btn_str = "MB3"
+            
+            if btn_str and btn_str in self.active_binds:
+                module = self.active_binds[btn_str]
+                if pressed:
+                    if not PRESSED_KEYS_STATE.get(module, False):
+                        PRESSED_KEYS_STATE[module] = True
+                        self.key_pressed.emit(module)
+                else:
+                    PRESSED_KEYS_STATE[module] = False
+                    self.key_released.emit(module)
 
-        self.kb_listener = KeyboardListener(on_press=on_press)
+        self.kb_listener = KeyboardListener(on_press=on_press, on_release=on_release)
         self.ms_listener = MouseListener(on_click=on_click)
         
         self.kb_listener.start()
@@ -652,6 +767,13 @@ class MacroLogicThread(QThread):
         self.module_name = module_name
         self.parent_window = parent
 
+    def _press_dynamic_key(self, key_str):
+        """Pomocnicza funkcja do klikania binda, wspierająca przyciski myszy i klawiaturę."""
+        if key_str == "mb4": mysz.click(Button.x1)
+        elif key_str == "mb5": mysz.click(Button.x2)
+        elif key_str == "mb3": mysz.click(Button.middle)
+        else: klawiatura.press(key_str); klawiatura.release(key_str)
+
     def run(self):
         global MAKR_JEST_AKTYWNE
         
@@ -667,10 +789,8 @@ class MacroLogicThread(QThread):
                     self.status_updated.emit("<font color='#E81123'>Błąd: Okno gry jest zamknięte.</font>")
                     return
                 
-                # ZABEZPIECZENIE: Sprawdzamy czy okno jest aktualnie aktywne (Foreground)
                 current_hwnd = win32gui.GetForegroundWindow()
                 if current_hwnd != target_hwnd:
-                    # Użytkownik robi coś innego na komputerze - ignorujemy makro w tle!
                     self.status_updated.emit("<font color='#888888'>Makro zignorowane (piszesz poza grą).</font>")
                     return
             else:
@@ -680,11 +800,40 @@ class MacroLogicThread(QThread):
             self.status_updated.emit(f"<font color='#E81123'>Błąd okna: {e}</font>")
             return
         
-        MAKR_JEST_AKTYWNE = True
+        if self.module_name != "Side Combo":
+            MAKR_JEST_AKTYWNE = True
+            
         self.status_updated.emit(f"<font color='#50B737'>Uruchamianie: {self.module_name}...</font>")
 
         try:
             if self.module_name == "Elytra Mace":
+                delay_z = DELAYS_Z.get(self.module_name, 0.05)
+                delay_s = DELAYS_S.get(self.module_name, 0.01)
+                
+                chest_bind = CONFIG_SLOTS["Elytra Mace"].get("chestplate_bind", "5")
+                final_bind = CONFIG_SLOTS["Elytra Mace"].get("final_bind", "4")
+                
+                # 1. Bind klaty + Right click
+                self._press_dynamic_key(chest_bind); time.sleep(delay_z)
+                mysz.click(Button.right); time.sleep(delay_z)
+                
+                # 2. MB4
+                mysz.click(Button.x1); time.sleep(delay_z)
+                
+                # 3. Left click (sekwencja uderzeń z delay_s)
+                for _ in range(5):
+                    mysz.click(Button.left); time.sleep(delay_s)
+                time.sleep(delay_z)
+                
+                # 4. Bind klaty + Right click
+                self._press_dynamic_key(chest_bind); time.sleep(delay_z)
+                mysz.click(Button.right); time.sleep(delay_z)
+                
+                # 5. Bind końcowy
+                self._press_dynamic_key(final_bind)
+                self.status_updated.emit("<font color='#50B737'>Sekwencja Zakończona.</font>")
+                
+            elif self.module_name == "Shield Slam":
                 delay_z = DELAYS_Z.get(self.module_name, 0.05)
                 delay_s = DELAYS_S.get(self.module_name, 0.01)
                 
@@ -700,62 +849,51 @@ class MacroLogicThread(QThread):
                 mysz.click(Button.right); time.sleep(delay_z) 
                 klawiatura.press(Key.space); klawiatura.release(Key.space); time.sleep(delay_z) 
                 klawiatura.press('4'); klawiatura.release('4')
+                self.status_updated.emit("<font color='#50B737'>Sekwencja Zakończona.</font>")
                 
             elif self.module_name == "Pearl":
                 slot = CONFIG_SLOTS["Pearl"]["slot"]
                 final = CONFIG_SLOTS["Pearl"]["final_slot"]
                 
-                # Obsługa slotu startowego (klawiatura lub mysz)
-                if slot == "mb4":
-                    mysz.click(Button.x1)
-                elif slot == "mb5":
-                    mysz.click(Button.x2)
-                elif slot == "mb3":
-                    mysz.click(Button.middle)
-                else:
-                    klawiatura.press(slot); klawiatura.release(slot)
-                    
-                time.sleep(0.05) # Opóźnienie na zmiane slota (wymagane w MC)
-                mysz.click(Button.right)
-                time.sleep(0.05) # Opóźnienie przed wróceniem
-                
-                # Obsługa slotu finałowego (klawiatura lub mysz)
-                if final == "mb4":
-                    mysz.click(Button.x1)
-                elif final == "mb5":
-                    mysz.click(Button.x2)
-                elif final == "mb3":
-                    mysz.click(Button.middle)
-                else:
-                    klawiatura.press(final); klawiatura.release(final)
+                self._press_dynamic_key(slot); time.sleep(0.05) 
+                mysz.click(Button.right); time.sleep(0.05) 
+                self._press_dynamic_key(final)
+                self.status_updated.emit("<font color='#50B737'>Sekwencja Zakończona.</font>")
                 
             elif self.module_name == "Side Combo":
                 final_btn = CONFIG_SLOTS["Side Combo"]["final_button"]
                 
-                mysz.click(Button.x2) 
-                time.sleep(0.01)      # Równo 10ms
-                mysz.click(Button.left)
-                time.sleep(0.05)      # Opóźnienie na wciśnięcie przycisku finałowego
+                # Pętla wykonująca się idealnie dopóki klawisz binda dla Side Combo jest przytrzymywany
+                while PRESSED_KEYS_STATE.get("Side Combo", False):
+                    if win32gui.GetForegroundWindow() != target_hwnd:
+                        break
+                        
+                    start_loop_time = time.perf_counter()
+                    
+                    mysz.click(Button.x2) 
+                    time.sleep(0.01)      # Dokładnie 10ms
+                    mysz.click(Button.left)
+                    time.sleep(0.05)      # Opóźnienie na wciśnięcie przycisku finałowego
+                    
+                    self._press_dynamic_key(final_btn)
+                    
+                    # Obliczenie czasu trwania sekwencji i precyzyjne odczekanie do pełnych 251 ms
+                    elapsed = time.perf_counter() - start_loop_time
+                    remaining_delay = 0.251 - elapsed
+                    if remaining_delay > 0:
+                        time.sleep(remaining_delay)
                 
-                # NAPRAWIONE: Obsługa przycisków myszy jako przycisku kończącego
-                if final_btn == "mb4":
-                    mysz.click(Button.x1)
-                elif final_btn == "mb5":
-                    mysz.click(Button.x2)
-                elif final_btn == "mb3":
-                    mysz.click(Button.middle)
-                else:
-                    klawiatura.press(final_btn); klawiatura.release(final_btn)
+                self.status_updated.emit("<font color='#50B737'>Pętla Side Combo Zatrzymana.</font>")
                 
             else:
                 time.sleep(0.1)
-                
-            self.status_updated.emit("<font color='#50B737'>Sekwencja Zakończona.</font>")
+                self.status_updated.emit("<font color='#50B737'>Sekwencja Zakończona.</font>")
             
         except Exception as e:
             self.status_updated.emit(f"<font color='#E81123'>Błąd makra: {e}</font>")
         finally:
-            MAKR_JEST_AKTYWNE = False
+            if self.module_name != "Side Combo":
+                MAKR_JEST_AKTYWNE = False
 
 
 # --- GŁÓWNA APLIKACJA (Mace Client Hub) ---
@@ -805,6 +943,7 @@ class MaceClientWindow(QMainWindow):
         
         self.listener_thread = InputListenerThread(parent=self)
         self.listener_thread.key_pressed.connect(self._handle_macro_activation)
+        self.listener_thread.key_released.connect(self._handle_macro_deactivation)
         self.listener_thread.start()
         
         self._set_view_content(self.VIEW_MODULES) 
@@ -959,7 +1098,7 @@ class MaceClientWindow(QMainWindow):
         message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         message_label.setStyleSheet("color: #FFFFFF;")
         
-        description_label = QLabel("Nowoczesna Wersja PySide6.\nArchitektura wspierająca konfigurację modułową i pełną obsługę myszy.")
+        description_label = QLabel("Nowoczesna Wersja PySide6.\nArchitektura wspierająca konfigurację modułową, trwały zapis stanu oraz pełną obsługę myszy z pętlą czasową.")
         description_label.setFont(QFont("Segoe UI", 13))
         description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         description_label.setWordWrap(True)
@@ -993,16 +1132,7 @@ class MaceClientWindow(QMainWindow):
         """)
         self.inject_btn.clicked.connect(self._handle_injection)
 
-    def _handle_macro_activation(self, module_triggered):
-        global MAKR_JEST_AKTYWNE
-
-        if MAKR_JEST_AKTYWNE or not self.IS_INJECTED:
-            return
-            
-        if not MODULE_STATES.get(module_triggered, False):
-            self.statusBar().showMessage(f"Moduł '{module_triggered}' jest WYŁĄCZONY. Aktywacja ignorowana.", 1500)
-            return
-
+    def _setup_macro_activation_for_module(self, module_triggered):
         self.statusBar().showMessage(f"Aktywacja makra: '{module_triggered}'...", 1500)
         self.macro_thread = MacroLogicThread(module_triggered, parent=self)
         
@@ -1010,6 +1140,25 @@ class MaceClientWindow(QMainWindow):
             self.macro_thread.status_updated.connect(self.config_windows[module_triggered].update_status)
         
         self.macro_thread.start()
+
+    def _handle_macro_activation(self, module_triggered):
+        global MAKR_JEST_AKTYWNE
+
+        if module_triggered != "Side Combo" and MAKR_JEST_AKTYWNE:
+            return
+            
+        if not self.IS_INJECTED:
+            return
+            
+        if not MODULE_STATES.get(module_triggered, False):
+            self.statusBar().showMessage(f"Moduł '{module_triggered}' jest WYŁĄCZONY. Aktywacja ignorowana.", 1500)
+            return
+
+        self._setup_macro_activation_for_module(module_triggered)
+
+    def _handle_macro_deactivation(self, module_released):
+        if module_released == "Side Combo":
+            self.statusBar().showMessage("Zatrzymywanie pętli Side Combo...", 1000)
 
     def _handle_injection(self):
         if not win32gui:
